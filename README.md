@@ -1,0 +1,2 @@
+No seguinte projeto utilizo o MetaTrader 5 para coletar dados de mercado em tempo real, calcula indicadores técnicos (MACD e Force Index) em diferentes time frames e executa operações de compra e venda com base em condições pré-definidas.
+A estratégia consiste, de maneira simples, aplicar uma variante da estratégia de "multiple time frames momentum strategy" explicado por Robert Miner no livro High Probability Trading Strategies.
