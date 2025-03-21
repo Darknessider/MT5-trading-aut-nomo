@@ -1,0 +1,305 @@
+import pandas as pd
+import MetaTrader5 as mt5
+from datetime import datetime, timedelta, timezone
+import numpy as np
+import time
+import talib as ta
+
+# =====================================================================
+# CONEXÃO COM O META TRADER 5
+# =====================================================================
+# Tenta inicializar a conexão com a plataforma MetaTrader 5.
+# Caso a conexão falhe, exibe mensagem de erro e encerra o programa.
+if not mt5.initialize():
+    print("initialize() falhou, código de erro =", mt5.last_error())
+    quit()
+
+# Lista de símbolos (ativos) que serão monitorados e negociados.
+symbols = ["BTCUSD", "ETHUSD"]
+
+# =====================================================================
+# FUNÇÕES PARA O CÁLCULO DE INDICADORES TÉCNICOS
+# =====================================================================
+
+def force_index(df, period=13):
+    """
+    Calcula o Force Index, que combina a variação do preço com o volume de ticks.
+    - Calcula a diferença entre o fechamento atual e o fechamento anterior.
+    - Multiplica a variação pelo volume de ticks.
+    - Aplica uma média móvel exponencial para suavizar os dados.
+    """
+    close_diff = df['close'].diff()  # Diferença entre os preços de fechamento consecutivos
+    raw_force_index = close_diff * df['tick_volume']  # Multiplica a diferença pelo volume de ticks
+    force_index = raw_force_index.ewm(span=period).mean()  # Calcula a média móvel exponencial
+    return force_index
+
+def process_data(df):
+    """
+    Processa dados de um timeframe curto (ex.: 5 minutos) para o cálculo de indicadores.
+    - Calcula o MACD (Moving Average Convergence Divergence) com parâmetros tradicionais.
+    - Remove colunas desnecessárias para reduzir o volume de dados.
+    - Converte colunas numéricas para float e arredonda os valores.
+    """
+    # Calcula o MACD utilizando períodos: fast=12, slow=26 e signal=13.
+    df['macd'], df['macdsignal'], df['macdhist'] = ta.MACD(df['close'], fastperiod=12, slowperiod=26, signalperiod=13)
+    # Remove colunas que não serão utilizadas na análise.
+    cols_to_drop = ['open', 'high', 'low', 'real_volume', 'macd', 'macdsignal', 'spread', 'tick_volume']
+    df = df.drop(cols_to_drop, axis=1)
+    # Converte as colunas restantes para float e arredonda para 6 casas decimais.
+    cols_to_convert = [col for col in df.columns if col != 'time']
+    df[cols_to_convert] = df[cols_to_convert].astype(float).round(6)
+    return df
+
+# =====================================================================
+# CONFIGURAÇÃO DE DATAFRAMES E VARIÁVEIS INICIAIS
+# =====================================================================
+# DataFrames para armazenar os dados dos diferentes timeframes.
+dataframe_5m = pd.DataFrame()
+dataframe_30m = pd.DataFrame()
+dataframe_maior = pd.DataFrame()
+
+count = 50  # Número inicial de barras de preço a serem obtidas.
+
+# Variáveis para controle do estado das ordens, ticket e volume para cada símbolo.
+order_state = {}
+order_ticket = {}
+order_volume = {}
+
+# Inicializa o estado da ordem para cada ativo na lista.
+for symbol in symbols:
+    order_state[symbol] = None
+    order_ticket[symbol] = None
+    order_volume[symbol] = None
+
+# =====================================================================
+# LOOP PRINCIPAL: AQUISIÇÃO DE DADOS, PROCESSAMENTO E EXECUÇÃO DE ORDENS
+# =====================================================================
+while True:
+    # Obtém o tempo atual (em segundos) para sincronizar as operações.
+    now = time.time()
+
+    # Calcula quantos segundos se passaram desde o último intervalo de 2 minutos.
+    seconds_since_last_interval = now % 120
+
+    # Calcula quantos segundos faltam para o próximo intervalo de 2 minutos.
+    seconds_until_next_interval = 120 - seconds_since_last_interval
+
+    # Aguarda até o próximo intervalo, garantindo a sincronização do loop.
+    time.sleep(seconds_until_next_interval)
+
+    # Define os volumes de operação para cada ativo (podem ser ajustados conforme estratégia).
+    volume = {
+        "EURUSD": 0.15,
+        "US500": 2.5,
+        "USTEC": 0.5,
+        "BTCUSD": 0.03,
+        "ETHUSD": 0.5,
+    }
+
+    # Itera sobre cada símbolo da lista para processar os dados e executar ordens.
+    for symbol in symbols:
+        # =====================================================================
+        # AQUISIÇÃO DE DADOS PARA DIVERSOS TIMEFRAMES
+        # =====================================================================
+        # Obtém os dados históricos mais recentes para cada timeframe:
+        # - 5 minutos
+        # - 30 minutos
+        # - 2 horas
+        new_data_5m = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, count)
+        new_data_30m = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M30, 0, count)
+        new_data_maior = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H2, 0, count)
+
+        # Verifica se os dados foram obtidos corretamente; se não, exibe mensagem e continua para o próximo símbolo.
+        if new_data_5m is None or new_data_30m is None:
+            print(f"Não foi possível obter dados para {symbol}")
+            continue
+
+        # Converte os dados obtidos para DataFrames do pandas.
+        new_data_5m = pd.DataFrame(new_data_5m)
+        new_data_30m = pd.DataFrame(new_data_30m)
+        new_data_maior = pd.DataFrame(new_data_maior)
+
+        # Converte a coluna 'time' de cada DataFrame para o formato datetime.
+        new_data_5m['time'] = pd.to_datetime(new_data_5m['time'], unit='s')
+        new_data_30m['time'] = pd.to_datetime(new_data_30m['time'], unit='s')
+        new_data_maior['time'] = pd.to_datetime(new_data_maior['time'], unit='s')
+
+        # =====================================================================
+        # PROCESSAMENTO DOS DADOS
+        # =====================================================================
+        # Aplica as funções de processamento para calcular os indicadores e limpar os dados.
+        new_data_5m = process_data(new_data_5m)
+        new_data_30m = process_data(new_data_30m)
+        new_data_maior = process_data(new_data_maior)
+
+        # Define a coluna 'time' como índice para facilitar a manipulação dos dados.
+        new_data_5m.set_index('time', inplace=True)
+        new_data_30m.set_index('time', inplace=True)
+        new_data_maior.set_index('time', inplace=True)
+
+        # Converte os valores das colunas para float e arredonda para 6 casas decimais.
+        for column in new_data_5m.columns:
+            if column != 'time':
+                new_data_5m[column] = new_data_5m[column].astype(float).round(6)
+
+        for column in new_data_30m.columns:
+            if column != 'time':
+                new_data_30m[column] = new_data_30m[column].astype(float).round(6)
+
+        for column in new_data_maior.columns:
+            if column != 'time':
+                new_data_maior[column] = new_data_maior[column].astype(float).round(6)
+
+        # =====================================================================
+        # ALINHAMENTO DOS DADOS ENTRE TIMEFRAMES
+        # =====================================================================
+        # Reindexa os DataFrames de 30 minutos e do timeframe maior para ter o mesmo índice de tempo do DataFrame de 5 minutos.
+        new_data_30m = new_data_30m.reindex(new_data_5m.index, method='ffill')
+        new_data_maior = new_data_maior.reindex(new_data_5m.index, method='ffill')
+
+        # Preenche valores ausentes com o último valor válido para manter a consistência.
+        new_data_30m.ffill(inplace=True)
+        new_data_maior.ffill(inplace=True)
+
+        # =====================================================================
+        # EXECUÇÃO DE ORDENES: COMPRA E VENDA
+        # =====================================================================
+
+        # --- EXECUÇÃO DE ORDEM DE COMPRA ---
+        # Condição para entrada de compra:
+        # - Não ter nenhuma ordem ativa.
+        # - Os indicadores MACD histogram e Force Index devem estar positivos em todos os timeframes analisados.
+        if (order_state[symbol] is None and
+                new_data_maior['macdhist'].iloc[-1] > 0 and
+                new_data_30m['force_index'].iloc[-1] > 0 and
+                new_data_30m['macdhist'].iloc[-1] > 0 and
+                new_data_5m['macdhist'].iloc[-1] > 0):
+            # Cria o request para enviar uma ordem de compra.
+            request = {
+                'action': mt5.TRADE_ACTION_DEAL,
+                'symbol': symbol,
+                'volume': volume[symbol],
+                'type': mt5.ORDER_TYPE_BUY,
+                'deviation': 20,
+                'magic': 234000,
+                'comment': "compra",
+                'type_time': mt5.ORDER_TIME_GTC,
+                'type_filling': mt5.ORDER_FILLING_IOC,
+            }
+            result = mt5.order_send(request)
+
+            # Verifica se a ordem foi executada com sucesso.
+            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                print("Error executing order:", mt5.last_error())
+                continue
+
+            # Atualiza o estado da ordem e armazena o ticket da ordem.
+            order_ticket[symbol] = result.order
+            order_state[symbol] = 'buy'
+
+        # Condição para fechar a posição de compra:
+        # Se o MACD histogram no timeframe de 5 minutos se inverter (tornar negativo).
+        elif order_state[symbol] == 'buy' and new_data_5m['macdhist'].iloc[-1] < 0:
+            request = {
+                'action': mt5.TRADE_ACTION_DEAL,
+                'symbol': symbol,
+                'volume': volume[symbol],  # Usa o mesmo volume da ordem de compra
+                'type': mt5.ORDER_TYPE_SELL,
+                'position': order_ticket[symbol],
+                'deviation': 20,
+                'magic': 234000,
+                'comment': "venda",
+                'type_time': mt5.ORDER_TIME_GTC,
+                'type_filling': mt5.ORDER_FILLING_IOC,
+            }
+            result = mt5.order_send(request)
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                print("Erro ao executar a ordem:", result.comment)
+                continue
+            # Reseta o estado da ordem para indicar que não há posição aberta.
+            order_state[symbol] = None
+
+        # --- EXECUÇÃO DE ORDEM DE VENDA ---
+        # Condição para entrada de venda:
+        # - Não ter nenhuma ordem ativa.
+        # - Os indicadores MACD histogram e Force Index devem estar negativos em todos os timeframes analisados.
+        if (order_state[symbol] is None and
+                new_data_maior['macdhist'].iloc[-1] < 0 and
+                new_data_30m['force_index'].iloc[-1] < 0 and
+                new_data_30m['macdhist'].iloc[-1] < 0 and
+                new_data_5m['macdhist'].iloc[-1] < 0):
+            # Cria o request para enviar uma ordem de venda.
+            request = {
+                'action': mt5.TRADE_ACTION_DEAL,
+                'symbol': symbol,
+                'volume': volume[symbol],
+                'type': mt5.ORDER_TYPE_SELL,
+                'deviation': 20,
+                'magic': 234000,
+                'comment': "venda",
+                'type_time': mt5.ORDER_TIME_GTC,
+                'type_filling': mt5.ORDER_FILLING_IOC,
+            }
+            result = mt5.order_send(request)
+
+            # Verifica se a ordem foi executada com sucesso.
+            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                print("Error executing order:", mt5.last_error())
+                continue
+
+            # Atualiza o estado da ordem e armazena o ticket da ordem.
+            order_ticket[symbol] = result.order
+            order_state[symbol] = 'sell'
+
+        # Condição para fechar a posição de venda:
+        # Se o MACD histogram no timeframe de 5 minutos se inverter (tornar positivo).
+        elif order_state[symbol] == 'sell' and new_data_5m['macdhist'].iloc[-1] > 0:
+            # Cria o request para enviar uma ordem de compra que fecha a posição de venda.
+            request = {
+                'action': mt5.TRADE_ACTION_DEAL,
+                'symbol': symbol,
+                'volume': volume[symbol],  # Usa o mesmo volume da ordem de venda
+                'type': mt5.ORDER_TYPE_BUY,
+                'position': order_ticket[symbol],
+                'deviation': 20,
+                'magic': 234000,
+                'comment': "compra",
+                'type_time': mt5.ORDER_TIME_GTC,
+                'type_filling': mt5.ORDER_FILLING_IOC,
+            }
+            result = mt5.order_send(request)
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                print("Erro ao executar a ordem:", result.comment)
+                continue
+            # Reseta o estado da ordem para indicar que a posição foi fechada.
+            order_state[symbol] = None
+
+        # =====================================================================
+        # ARMAZENAMENTO DOS DADOS HISTÓRICOS
+        # =====================================================================
+        # Concatena os novos dados aos DataFrames existentes, mantendo o histórico.
+        dataframe_5m = pd.concat([dataframe_5m, new_data_5m])
+        # Remove duplicatas de índices, mantendo o último registro válido.
+        dataframe_5m = dataframe_5m.loc[~dataframe_5m.index.duplicated(keep='last')]
+
+        dataframe_30m = pd.concat([dataframe_30m, new_data_30m])
+        dataframe_30m = dataframe_30m.loc[~dataframe_30m.index.duplicated(keep='last')]
+
+        dataframe_maior = pd.concat([dataframe_maior, new_data_maior])
+        dataframe_maior = dataframe_maior.loc[~dataframe_maior.index.duplicated(keep='last')]
+
+        # =====================================================================
+        # EXIBIÇÃO DOS DADOS PROCESSADOS
+        # =====================================================================
+        # Imprime os DataFrames atualizados para monitoramento e debug.
+        print(f"DataFrame para {symbol} (5m):")
+        print(dataframe_5m)
+
+        print(f"DataFrame para {symbol} (30m):")
+        print(dataframe_30m)
+
+        print(f"DataFrame para {symbol} (maior):")
+        print(dataframe_maior)
+
+    # Incrementa o contador de barras para a próxima iteração do loop.
+    count += 1
